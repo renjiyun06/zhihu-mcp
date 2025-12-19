@@ -136,10 +136,15 @@ def main():
                 logger.error("Invalid port number, using default 8001")
 
     logger.info("Using transport: %s", transport)
-    logger.info("Using port: %d", port)
 
-    # Run the server
-    mcp.run(transport=transport, port=port)
+    # Run the server with appropriate parameters
+    if transport == "stdio":
+        # stdio mode doesn't need port parameter
+        mcp.run(transport=transport)
+    else:
+        # sse/http mode needs port parameter
+        logger.info("Using port: %d", port)
+        mcp.run(transport=transport, port=port)
 
 
 if __name__ == "__main__":

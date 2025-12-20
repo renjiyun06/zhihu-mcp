@@ -1,10 +1,10 @@
-"""Zhihu client - Browser automation via chrome-devtools MCP"""
+"""Zhihu client - Browser automation via Playwright"""
 
 import asyncio
 import json
 import logging
-import re
-from typing import Any, Dict, List
+from typing import Any, Dict
+from playwright.async_api import async_playwright, Browser, Page
 from fastmcp import Client
 from fastmcp.client import NpxStdioTransport
 
@@ -16,28 +16,23 @@ class ZhihuClient:
 
     def __init__(
         self,
-        chrome_package: str = "chrome-devtools-mcp@latest",
-        chrome_args: List[str] = None
+        cdp_endpoint: str = "http://192.168.2.6:19222",
+        chrome_package: str = "chrome-devtools-mcp@latest"
     ):
         """
         Initialize Zhihu client
 
         Args:
-            chrome_package: NPM package name for chrome-devtools MCP
-            chrome_args: Arguments for the chrome-devtools MCP server
+            cdp_endpoint: Chrome DevTools Protocol endpoint URL
+            chrome_package: NPM package name for chrome-devtools MCP (used by publish_idea)
         """
-        if chrome_args is None:
-            chrome_args = [
-                "--browser-url=http://192.168.2.6:19222"
-            ]
-
+        self.cdp_endpoint = cdp_endpoint
         self.chrome_package = chrome_package
-        self.chrome_args = chrome_args
+        self.chrome_args = [f"--browser-url={cdp_endpoint}"]
 
         logger.info(
-            "ZhihuClient initialized with package: %s, args: %s",
-            chrome_package,
-            chrome_args
+            "ZhihuClient initialized with CDP endpoint: %s",
+            cdp_endpoint
         )
 
     async def publish_idea(
@@ -320,218 +315,102 @@ class ZhihuClient:
         logger.info("Starting to publish article with title: %s", title)
         logger.debug("Content length: %d", len(content))
 
-        # Create NPX transport for chrome-devtools MCP
-        transport = NpxStdioTransport(
-            package=self.chrome_package,
-            args=self.chrome_args
-        )
-        logger.debug(
-            "Connecting to chrome-devtools via npx: %s %s",
-            self.chrome_package,
-            " ".join(self.chrome_args)
-        )
+        async with async_playwright() as p:
+            logger.debug("Connecting to browser via CDP: %s", self.cdp_endpoint)
+            browser = await p.chromium.connect_over_cdp(self.cdp_endpoint)
 
-        async with Client(transport) as client:
-            logger.debug("Connected to chrome-devtools MCP server")
-
-            # Step 1: Navigate to article write page
-            logger.debug("Navigating to article write page")
-            await client.call_tool(
-                "navigate_page",
-                {
-                    "type": "url",
-                    "url": "https://zhuanlan.zhihu.com/write"
-                }
-            )
-            logger.debug("Navigation completed")
-
-            # Wait for page to load
-            logger.debug("Waiting for page to load")
-            await asyncio.sleep(3)
-
-            # Step 2: Fill title
-            # Take snapshot just before filling
-            logger.debug("Taking snapshot to locate title input")
-            snapshot1 = await client.call_tool("take_snapshot", {})
-            snapshot1_text = str(snapshot1)
-
-            # Find first textbox (title)
-            textbox_pattern = r'uid=(\d+_\d+)\s+textbox.*?multiline'
-            matches1 = list(re.finditer(textbox_pattern, snapshot1_text))
-
-            if len(matches1) < 1:
-                logger.error("Failed to locate title input")
+            # Get the first page (assuming browser is already open)
+            contexts = browser.contexts
+            if not contexts:
+                logger.error("No browser contexts found")
                 return {
                     "success": False,
-                    "message": "Failed to locate title input field"
+                    "message": "No browser contexts found"
                 }
 
-            title_uid = matches1[0].group(1)
-            logger.debug("Found title uid: %s", title_uid)
-
-            # Fill title immediately
-            logger.debug("Filling title")
-            await client.call_tool(
-                "fill",
-                {
-                    "uid": title_uid,
-                    "value": title
-                }
-            )
-            logger.debug("Title filled successfully")
-
-            # Wait for UI to update
-            await asyncio.sleep(1)
-
-            # Step 3: Fill content
-            # Take fresh snapshot just before filling content
-            logger.debug("Taking fresh snapshot to locate content input")
-            snapshot2 = await client.call_tool("take_snapshot", {})
-            snapshot2_text = str(snapshot2)
-
-            # Find textbox with description="请输入正文"
-            matches2 = list(re.finditer(textbox_pattern, snapshot2_text))
-
-            content_uid = None
-            for i, match in enumerate(matches2):
-                uid = match.group(1)
-                # Extract just this element's declaration (until next uid= or newline + non-space)
-                line_start = match.start()
-                # Find the end: either next "uid=" or a newline followed by non-indented content
-                next_uid_pos = snapshot2_text.find('uid=', line_start + 10)
-                line_end = snapshot2_text.find('\n  uid=', line_start)  # Next sibling element
-
-                if line_end == -1 or (next_uid_pos != -1 and next_uid_pos < line_end):
-                    line_end = next_uid_pos if next_uid_pos != -1 else line_start + 300
-
-                element_text = snapshot2_text[line_start:line_end]
-
-                has_desc = 'description="请输入正文"' in element_text
-                logger.debug("Textbox %d: uid=%s, has_desc=%s", i, uid, has_desc)
-                logger.debug("  Element: %s", element_text[:120])
-
-                if has_desc:
-                    content_uid = uid
-                    logger.debug("✓ Found content uid: %s", content_uid)
-                    break
-
-            # Fallback: if not found by description, use second textbox
-            if not content_uid and len(matches2) >= 2:
-                content_uid = matches2[1].group(1)
-                logger.debug("Using second textbox as content uid: %s", content_uid)
-
-            if not content_uid:
-                logger.error("Failed to locate content input")
+            context = contexts[0]
+            pages = context.pages
+            if not pages:
+                logger.error("No pages found in browser context")
                 return {
                     "success": False,
-                    "message": "Failed to locate content input field"
+                    "message": "No pages found"
                 }
 
-            # Fill content immediately
-            logger.debug("Filling content")
-            await client.call_tool(
-                "fill",
-                {
-                    "uid": content_uid,
-                    "value": content
-                }
-            )
-            logger.debug("Content filled successfully")
+            page = pages[0]
+            logger.debug("Using existing page")
 
-            # Wait for auto-save to complete
-            logger.debug("Waiting for auto-save to complete")
-            await asyncio.sleep(3)
+            try:
+                # Step 1: Navigate to article write page
+                logger.debug("Navigating to article write page")
+                await page.goto(
+                    "https://zhuanlan.zhihu.com/write",
+                    wait_until="domcontentloaded"
+                )
+                logger.debug("Navigation completed")
 
-            # Step 5: Click publish button using evaluate_script
-            logger.debug("Clicking publish button")
-            publish_js = """() => {
-                const publishBtn = Array.from(
-                    document.querySelectorAll('button')
-                ).find(b => b.textContent.trim() === '发布');
+                # Wait for page to load
+                logger.debug("Waiting for page to load")
+                await asyncio.sleep(3)
 
-                if (!publishBtn) {
-                    return {
-                        success: false,
-                        error: 'Publish button not found'
-                    };
-                }
+                # Step 2: Fill title with long timeout (5 minutes)
+                logger.debug("Filling title field")
+                title_input = page.locator('textarea[placeholder]')
+                await title_input.fill(title, timeout=300000)
+                logger.debug("Title filled successfully")
 
-                if (publishBtn.disabled) {
-                    return {
-                        success: false,
-                        error: 'Publish button is disabled'
-                    };
-                }
+                # Wait for UI to update
+                await asyncio.sleep(1)
 
-                publishBtn.click();
-                return { success: true };
-            }"""
+                # Step 3: Fill content with long timeout (5 minutes)
+                logger.debug("Filling content field")
+                editor = page.locator('div[contenteditable="true"][role="textbox"]')
+                await editor.fill(content, timeout=300000)
+                logger.debug("Content filled successfully")
 
-            publish_result = await client.call_tool(
-                "evaluate_script",
-                {"function": publish_js}
-            )
-            publish_data = (
-                publish_result.data
-                if hasattr(publish_result, 'data')
-                else publish_result
-            )
-            logger.debug("Publish button click result: %s", publish_data)
+                # Wait for auto-save to complete
+                logger.debug("Waiting for auto-save to complete")
+                await asyncio.sleep(3)
 
-            # Note: Click may return None, but operation might still succeed
-            if publish_data and not publish_data.get("success"):
-                logger.warning(
-                    "Click publish button returned error: %s",
-                    publish_data.get("error")
+                # Step 4: Click publish button
+                # Use filter to match exact text "发布", not "发布设置"
+                logger.debug("Clicking publish button")
+                publish_btn = page.locator('button').filter(has_text="发布").filter(has_not_text="设置")
+                await publish_btn.click()
+                logger.debug("Publish button clicked")
+
+                # Wait for publishing to complete
+                logger.debug("Waiting for publishing to complete")
+                await asyncio.sleep(5)
+
+                # Step 5: Check the publishing result
+                logger.debug("Checking publishing result")
+                current_url = page.url
+                page_text = await page.locator('body').text_content()
+
+                has_success_msg = '发布成功' in page_text
+                is_article_page = '/p/' in current_url
+
+                success = has_success_msg or is_article_page
+                message = (
+                    'Published successfully' if has_success_msg
+                    else ('Redirected to article page' if is_article_page
+                          else 'Publishing status unknown')
                 )
 
-            # Wait for publishing to complete
-            logger.debug("Waiting for publishing to complete")
-            await asyncio.sleep(5)
-
-            # Step 6: Check the publishing result
-            logger.debug("Checking publishing result")
-            check_js = """() => {
-                const hasSuccessMsg = document.body.textContent.includes(
-                    '发布成功'
-                );
-                const currentUrl = window.location.href;
-                const isArticlePage = currentUrl.includes('/p/') &&
-                                     !currentUrl.includes('/edit');
+                if success:
+                    logger.info("Article published successfully")
+                    logger.info("Article URL: %s", current_url)
+                else:
+                    logger.warning("Publishing result unclear: %s", message)
 
                 return {
-                    success: hasSuccessMsg || isArticlePage,
-                    message: hasSuccessMsg
-                        ? 'Published successfully'
-                        : (isArticlePage
-                            ? 'Redirected to article page'
-                            : 'Publishing status unknown'),
-                    url: currentUrl
-                };
-            }"""
-
-            check_result = await client.call_tool(
-                "evaluate_script",
-                {"function": check_js}
-            )
-
-            # Extract actual data from CallToolResult object
-            result_data = check_result.data if hasattr(check_result, 'data') else check_result
-
-            if result_data is None:
-                logger.warning("Check result returned None - publishing may have succeeded")
-                return {
-                    "success": True,
-                    "message": "Publishing completed, but unable to verify result"
+                    "success": success,
+                    "message": message,
+                    "url": current_url
                 }
 
-            if result_data.get("success"):
-                logger.info("Article published successfully")
-                logger.info("Article URL: %s", result_data.get("url"))
-            else:
-                logger.warning(
-                    "Publishing result unclear: %s",
-                    result_data.get("message")
-                )
-
-            return result_data
+            finally:
+                # Don't close browser since it's a shared instance
+                await browser.close()
+                logger.debug("Disconnected from browser")
